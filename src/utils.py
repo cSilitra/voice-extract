@@ -13,6 +13,8 @@ from pyannote.audio import Pipeline
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.runnables import RunnablePassthrough, RunnableMap
 
 
 def trascribe_audio_by_openAI(audio_file: str, openAIClient) -> str:
@@ -23,6 +25,7 @@ def trascribe_audio_by_openAI(audio_file: str, openAIClient) -> str:
             file=audio_file,
             response_format="diarized_json",
             chunking_strategy="auto", #'VadConfig.'
+            # if we have know speaker we can use a sample for matching
             #extra_body={ "known_speaker_names": ["agent"], 
            #             "known_speaker_references": [to_data_url("call_center_voice_sample1.wav")] },
         )
@@ -46,8 +49,9 @@ def format_transcript(segments):
     agent_speaker = None
     client_speaker = None
 
+    # the key_word  for identify which speaker is the agent 
     KEYWORD = "nissan"
-
+    # segment format {text:String,start:number,end:number,speaker:string }
     for seg in segments:
         text = seg.text.strip()
         text_lower = text.lower()
@@ -199,6 +203,7 @@ def create_chroma_vector_store(embeddings,chroma_db_path) -> Chroma:
             persist_directory=chroma_db_path,
             embedding_function=embeddings
         )
+        print("Loaded existing vector store from")
     else:
         # Create new vector store if none exists
         vector_store = Chroma(
@@ -206,6 +211,7 @@ def create_chroma_vector_store(embeddings,chroma_db_path) -> Chroma:
             embedding_function=embeddings,
             persist_directory=chroma_db_path
         )
+        print("Created new vector store")
 
     return vector_store
 
@@ -284,10 +290,12 @@ def delete_vector_store(chroma_db_path):
 def query_vector_store(vector_store,query, speaker_target:str = "Any", top_k: int = 3):
     # speaker_target: "Client" | "Agent"
     filt = {"speaker": speaker_target} if speaker_target != "Any" else None
+    print('similarity_search query:',query)
     results = vector_store.similarity_search(
         query,
-        k=top_k,
-        filter=filt
+        k=3,
+        #k=top_k,
+        #filter=filt
     )
 
     return {
@@ -303,3 +311,43 @@ def query_vector_store(vector_store,query, speaker_target:str = "Any", top_k: in
             for r in results
         ]
     }
+
+#@todo , refactor it- > needs to work with a new set of matches
+def query_vector_store_V2(vector_store,query, speaker_target:str = "Any", top_k: int = 3):
+    # speaker_target: "Client" | "Agent"
+    filt = {"speaker": speaker_target} if speaker_target != "Any" else None
+    print('similarity_search query:',query)
+    results = vector_store.similarity_search(
+        query,
+        k=3,
+        #k=top_k,
+        #filter=filt
+    )
+
+    return results
+
+def create_rag_chain(llm, retriever):
+    # If you don't know the answer, just say that you don't know, don't try to make up an answer.
+    prompt = ChatPromptTemplate.from_template("""
+        You are a helpful analyst. 
+        Use the following context to answer the question.
+    
+        Respond in JSON format.
+        If you don't know the answer, just say that you don't know, don't try to make up an answer.
+                                                     
+        Context:
+        {context}
+
+        Question:
+        {question}
+        """)
+    
+    rag_chain = (
+        RunnableMap({
+            "context": retriever | (lambda docs: "\n\n".join(doc.page_content for doc in docs)),
+            "question": RunnablePassthrough(),
+        })
+        | prompt
+        | llm
+    )
+    return rag_chain
